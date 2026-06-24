@@ -3,94 +3,112 @@ import fitz  # PyMuPDF
 import io
 
 st.set_page_config(page_title="PDF Cleaner", page_icon="⚖️")
-st.title("Watermark Remover (Multi-File)")
+st.title("Watermark Remover (True Batch)")
 
-# Enable multiple file uploads
 uploaded_files = st.file_uploader("Upload your PDFs", type="pdf", accept_multiple_files=True)
 
 if uploaded_files:
     # ----------------------------------------------------
-    # Step 1: Preview images from the FIRST file to find the ID
+    # Step 1: Extract all unique images from the first file to find the "Fingerprint"
     # ----------------------------------------------------
-    st.subheader("1. Identify Your Watermark")
-    st.write("Scanning the first uploaded file to identify the watermark image ID. Find the ID of the diagonal watermark below:")
+    st.subheader("1. Select the Watermark to Remove")
+    st.write("We will extract unique images from your first file. Select the one you want wiped from ALL files.")
 
     first_file = uploaded_files[0]
-    # Read into bytes so we don't exhaust the stream if we need it later
     first_file_bytes = first_file.read()
     doc_preview = fitz.open(stream=first_file_bytes, filetype="pdf")
     
-    images = doc_preview[0].get_images(full=True)
+    # We will map image bytes to their sample XRef to show them uniquely
+    unique_images = {}
     
-    if images:
-        cols = st.columns(3)
-        for i, img in enumerate(images):
+    for page in doc_preview:
+        for img in page.get_images(full=True):
             xref = img[0]
+            base_image = doc_preview.extract_image(xref)
+            if base_image:
+                img_bytes = base_image["image"]
+                # Use the image bytes as a unique key so we don't show duplicates
+                if img_bytes not in unique_images:
+                    unique_images[img_bytes] = xref
+
+    if unique_images:
+        cols = st.columns(3)
+        selected_watermark_bytes = None
+        
+        # Display images with a radio button choice or selection
+        image_list = list(unique_images.items())
+        
+        # Let user choose via a selectbox or radio based on index
+        options = [f"Image Option {idx+1} (XRef {xref})" for idx, (bytes_data, xref) in enumerate(image_list)]
+        selected_option = st.radio("Choose which image is the watermark:", options)
+        selected_index = options.index(selected_option)
+        
+        # Store the raw bytes of the chosen watermark
+        target_watermark_bytes = image_list[selected_index][0]
+
+        # Preview what they are currently selecting in a grid layout
+        for idx, (img_bytes, xref) in enumerate(image_list):
             try:
-                pix = fitz.Pixmap(doc_preview, xref)
-                if pix.n - pix.alpha > 3:
-                    pix = fitz.Pixmap(fitz.csRGB, pix)
-                
-                img_data = pix.tobytes("png")
-                
-                with cols[i % 3]:
-                    st.image(img_data, caption=f"ID: {xref}", use_container_width=True)
-                    st.write(f"**XRef ID: {xref}**")
-            except Exception as e:
+                with cols[idx % 3]:
+                    st.image(img_bytes, caption=f"Option {idx+1}", use_container_width=True)
+            except Exception:
                 continue
     else:
-        st.warning("No images found on Page 1 of the first PDF to preview.")
+        st.warning("No images found in the first PDF.")
+        target_watermark_bytes = None
 
     st.divider()
 
     # ----------------------------------------------------
-    # Step 2: Remove and Download
+    # Step 2: Batch Process Entire List
     # ----------------------------------------------------
-    st.subheader("2. Remove and Download")
-    ids_to_remove = st.text_input("Enter the IDs you want to remove (comma separated, e.g., 3847, 3848)")
-
-    if ids_to_remove:
-        try:
-            target_ids = [int(x.strip()) for x in ids_to_remove.split(",") if x.strip()]
-        except ValueError:
-            st.error("Please enter valid numeric IDs separated by commas.")
-            target_ids = []
-
-        if target_ids and st.button("Clean All PDFs"):
-            st.write("### Processed Files")
-            
-            # Loop through all uploaded files
-            for uploaded_file in uploaded_files:
-                try:
-                    # Reset stream pointer if it was the first file, or just read the bytes
-                    if uploaded_file == first_file:
-                        file_bytes = first_file_bytes
-                    else:
-                        file_bytes = uploaded_file.read()
-                        
-                    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    st.subheader("2. Run Batch Purge")
+    
+    if target_watermark_bytes and st.button("Delete Watermark From All Files"):
+        st.write("### Processing Status")
+        
+        for uploaded_file in uploaded_files:
+            try:
+                # Reset stream pointer and load file
+                if uploaded_file == first_file:
+                    file_bytes = first_file_bytes
+                else:
+                    file_bytes = uploaded_file.read()
                     
-                    # Process every page in the current document
+                doc = fitz.open(stream=file_bytes, filetype="pdf")
+                bad_xrefs = set()
+                
+                # Dynamic Scan: Find IDs in THIS specific file that match our target watermark's data
+                for page in doc:
+                    for img in page.get_images(full=True):
+                        xref = img[0]
+                        base_image = doc.extract_image(xref)
+                        if base_image and base_image["image"] == target_watermark_bytes:
+                            bad_xrefs.add(xref)
+                
+                # Delete those matching IDs from every page
+                if bad_xrefs:
                     for page in doc:
-                        for tid in target_ids:
+                        for xref in bad_xrefs:
                             try:
-                                page.delete_image(tid)
+                                page.delete_image(xref)
                             except Exception:
-                                # In case a specific ID doesn't exist on this page/file
                                 pass
                     
-                    # Save output
-                    output_bytes = doc.write()
+                    # Re-optimize/compact PDF structure to completely wipe deleted object layers
+                    output_bytes = doc.write(garbage=3, deflate=True)
                     
-                    # Display success message and a dedicated download button for each file
-                    st.success(f"Cleaned: {uploaded_file.name}")
+                    st.success(f"✅ Cleaned: {uploaded_file.name}")
                     st.download_button(
                         label=f"Download cleaned_{uploaded_file.name}",
                         data=output_bytes,
                         file_name=f"cleaned_{uploaded_file.name}",
                         mime="application/pdf",
-                        key=f"dl_{uploaded_file.name}" # Unique key for Streamlit widgets
+                        key=f"dl_{uploaded_file.name}"
                     )
-                    st.markdown("---")
-                except Exception as e:
-                    st.error(f"Could not process {uploaded_file.name}: {e}")
+                else:
+                    st.info(f"ℹ️ Skipped {uploaded_file.name}: Watermark image data not found inside.")
+                    
+                st.markdown("---")
+            except Exception as e:
+                st.error(f"❌ Error processing {uploaded_file.name}: {e}")
