@@ -1,8 +1,3 @@
-Yes, that is completely possible! We can bundle all the processed files into an in-memory ZIP archive using Python’s built-in `zipfile` module and offer a single click download button.
-
-Here is the updated code implementing the ZIP compilation batch download:
-
-```python
 import streamlit as st
 import fitz  # PyMuPDF
 import io
@@ -124,5 +119,3 @@ if uploaded_files:
             )
         else:
             st.warning("No files were successfully processed/modified to pack into a ZIP archive.")
-
-```
